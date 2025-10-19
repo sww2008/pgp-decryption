@@ -1,0 +1,122 @@
+name: Deploy Lambda to AWS
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+        - dev
+        - staging
+        - production
+
+env:
+  AWS_REGION: us-east-1
+  LAMBDA_FUNCTION_NAME: pgp-decrypt-lambda
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js 22.x
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22.x'
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Create Lambda deployment package
+      run: |
+        # Create a clean directory for the Lambda package
+        mkdir -p lambda-package
+        
+        # Copy source files
+        cp index.js lambda-package/
+        cp package.json lambda-package/
+        cp package-lock.json lambda-package/ 2>/dev/null || true
+        
+        # Install production dependencies only
+        cd lambda-package
+        npm ci --only=production
+        
+        # Remove development dependencies and unnecessary files
+        rm -rf node_modules/.cache
+        rm -rf node_modules/**/test
+        rm -rf node_modules/**/tests
+        rm -rf node_modules/**/*.md
+        rm -rf node_modules/**/README*
+        rm -rf node_modules/**/CHANGELOG*
+        rm -rf node_modules/**/LICENSE*
+        rm -rf node_modules/**/LICENCE*
+        
+        # Create the deployment zip
+        zip -r ../lambda-deployment.zip .
+        cd ..
+        
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+        
+    - name: Deploy to AWS Lambda
+      run: |
+        # Check if function exists
+        if aws lambda get-function --function-name ${{ env.LAMBDA_FUNCTION_NAME }}-${{ github.event.inputs.environment || 'dev' }} &> /dev/null; then
+          echo "Updating existing Lambda function..."
+          aws lambda update-function-code \
+            --function-name ${{ env.LAMBDA_FUNCTION_NAME }}-${{ github.event.inputs.environment || 'dev' }} \
+            --zip-file fileb://lambda-deployment.zip
+        else
+          echo "Lambda function does not exist. Please create it first using the deploy.sh script or AWS Console."
+          exit 1
+        fi
+        
+    - name: Update function configuration
+      run: |
+        aws lambda update-function-configuration \
+          --function-name ${{ env.LAMBDA_FUNCTION_NAME }}-${{ github.event.inputs.environment || 'dev' }} \
+          --runtime nodejs22.x \
+          --timeout 900 \
+          --memory-size 1024 \
+          --description "Decrypt PGP encrypted files from S3 using private key from Secrets Manager"
+          
+    - name: Test Lambda function
+      run: |
+        echo "Testing Lambda function..."
+        aws lambda invoke \
+          --function-name ${{ env.LAMBDA_FUNCTION_NAME }}-${{ github.event.inputs.environment || 'dev' }} \
+          --payload '{}' \
+          response.json
+        
+        echo "Lambda response:"
+        cat response.json
+        
+        # Check if the response contains an error
+        if grep -q '"errorMessage"' response.json; then
+          echo "❌ Lambda function test failed"
+          exit 1
+        else
+          echo "✅ Lambda function test passed"
+        fi
+        
+    - name: Upload deployment artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: lambda-deployment-${{ github.event.inputs.environment || 'dev' }}
+        path: lambda-deployment.zip
+        retention-days: 30

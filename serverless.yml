@@ -1,0 +1,50 @@
+service: pgp-decrypt-lambda
+
+provider:
+  name: aws
+  runtime: nodejs22.x
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  
+  # IAM permissions
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - secretsmanager:GetSecretValue
+          Resource:
+            - arn:aws:secretsmanager:${aws:region}:${aws:accountId}:secret:pgp-key*
+        - Effect: Allow
+          Action:
+            - s3:GetObject
+            - s3:PutObject
+            - s3:ListBucket
+          Resource:
+            - arn:aws:s3:::sftp-file-sync-vivien
+            - arn:aws:s3:::sftp-file-sync-vivien/*
+
+functions:
+  decryptFiles:
+    handler: index.handler
+    name: ${self:service}-${self:provider.stage}-decrypt-files
+    description: Decrypt PGP encrypted files from S3 using private key from Secrets Manager
+    timeout: 900  # 15 minutes
+    memorySize: 1024
+    
+    # Environment variables
+    environment:
+      AWS_REGION: ${self:provider.region}
+    
+    # Event triggers (optional - can be triggered manually or by S3 events)
+    events:
+      - schedule:
+          rate: rate(1 hour)  # Run every hour
+          enabled: false  # Disabled by default, enable as needed
+
+plugins:
+  - serverless-offline
+
+custom:
+  serverless-offline:
+    httpPort: 3000

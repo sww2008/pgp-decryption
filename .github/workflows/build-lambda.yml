@@ -1,0 +1,70 @@
+name: Build Lambda Package
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js 22.x
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22.x'
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Run tests (if any)
+      run: npm test --if-present
+      
+    - name: Create Lambda deployment package
+      run: |
+        # Create a clean directory for the Lambda package
+        mkdir -p lambda-package
+        
+        # Copy source files
+        cp index.js lambda-package/
+        cp package.json lambda-package/
+        cp package-lock.json lambda-package/ 2>/dev/null || true
+        
+        # Install production dependencies only
+        cd lambda-package
+        npm ci --only=production
+        
+        # Remove development dependencies and unnecessary files
+        rm -rf node_modules/.cache
+        rm -rf node_modules/**/test
+        rm -rf node_modules/**/tests
+        rm -rf node_modules/**/*.md
+        rm -rf node_modules/**/README*
+        rm -rf node_modules/**/CHANGELOG*
+        rm -rf node_modules/**/LICENSE*
+        rm -rf node_modules/**/LICENCE*
+        
+        # Create the deployment zip
+        zip -r ../lambda-deployment.zip .
+        cd ..
+        
+    - name: Upload Lambda package
+      uses: actions/upload-artifact@v4
+      with:
+        name: lambda-deployment-package
+        path: lambda-deployment.zip
+        retention-days: 30
+        
+    - name: Display package size
+      run: |
+        echo "Lambda package size:"
+        ls -lh lambda-deployment.zip
+        echo "Package contents:"
+        unzip -l lambda-deployment.zip | head -20

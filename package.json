@@ -1,0 +1,25 @@
+{
+  "name": "pgp-decrypt-lambda",
+  "version": "1.0.0",
+  "description": "AWS Lambda function to decrypt PGP encrypted files from S3",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "aws-sdk": "^2.1490.0",
+    "openpgp": "^5.10.1"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "keywords": [
+    "aws",
+    "lambda",
+    "pgp",
+    "decrypt",
+    "s3"
+  ],
+  "author": "",
+  "license": "MIT"
+}
