@@ -4,11 +4,13 @@
   "description": "AWS Lambda function to decrypt PGP encrypted files from S3",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node test-lambda.js",
+    "test:basic": "node -e \"require('./test-lambda.js').runTests()\"",
+    "test:env": "node -e \"require('./test-lambda.js').testWithCustomEnv()\""
   },
   "dependencies": {
     "aws-sdk": "^2.1490.0",
-    "gpg": "^0.1.0"
+    "openpgp": "^5.10.1"
   },
   "engines": {
     "node": ">=22.0.0"

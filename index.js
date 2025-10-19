@@ -1,16 +1,9 @@
 const AWS = require('aws-sdk');
-const gpg = require('gpg');
-const { exec } = require('child_process');
-const { promisify } = require('util');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-
-const execAsync = promisify(exec);
+const openpgp = require('openpgp');
 
 // Initialize AWS services
-const secretsManager = new AWS.SecretsManager({ region: process.env.AWS_REGION || 'us-east-1' });
-const s3 = new AWS.S3({ region: process.env.AWS_REGION || 'us-east-1' });
+const secretsManager = new AWS.SecretsManager({ region: process.env.AWS_REGION || 'ap-southeast-2' });
+const s3 = new AWS.S3({ region: process.env.AWS_REGION || 'ap-southeast-2' });
 
 /**
  * Retrieves PGP private key from AWS Secrets Manager
@@ -118,57 +111,41 @@ async function uploadDecryptedFile(bucketName, key, decryptedContent) {
 }
 
 /**
- * Decrypts a file using GPG command line tool
+ * Decrypts a file using PGP private key
  * @param {Buffer} encryptedData - Encrypted file data
  * @param {string} privateKeyArmored - PGP private key in armored format
- * @param {string} passphrase - Passphrase for the private key
+ * @param {string} passphrase - Optional passphrase for the private key
  * @returns {Promise<Buffer>} - Decrypted file content
  */
 async function decryptFile(encryptedData, privateKeyArmored, passphrase) {
   try {
-    console.log('Starting GPG decryption process');
+    console.log('Starting PGP decryption process');
 
-    // Create temporary directory for GPG operations
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gpg-'));
-    const keyFile = path.join(tempDir, 'private-key.asc');
-    const encryptedFile = path.join(tempDir, 'encrypted.gpg');
-    const decryptedFile = path.join(tempDir, 'decrypted');
+    // Read the private key
+    let privateKey = await openpgp.readPrivateKey({ armoredKey: privateKeyArmored });
 
-    try {
-      // Write private key to temporary file
-      fs.writeFileSync(keyFile, privateKeyArmored);
-
-      // Write encrypted data to temporary file
-      fs.writeFileSync(encryptedFile, encryptedData);
-
-      // Import the private key
-      console.log('Importing private key...');
-      await execAsync(`gpg --import --batch --yes "${keyFile}"`);
-
-      // Decrypt the file using GPG
-      console.log('Decrypting file...');
-      const decryptCommand = `gpg --decrypt --batch --yes --passphrase "${passphrase}" --output "${decryptedFile}" "${encryptedFile}"`;
-      await execAsync(decryptCommand);
-
-      // Read the decrypted content
-      const decryptedData = fs.readFileSync(decryptedFile);
-
-      console.log('GPG decryption completed successfully');
-      return decryptedData;
-
-    } finally {
-      // Clean up temporary files
-      try {
-        if (fs.existsSync(keyFile)) fs.unlinkSync(keyFile);
-        if (fs.existsSync(encryptedFile)) fs.unlinkSync(encryptedFile);
-        if (fs.existsSync(decryptedFile)) fs.unlinkSync(decryptedFile);
-        fs.rmdirSync(tempDir);
-      } catch (cleanupError) {
-        console.warn('Warning: Failed to clean up temporary files:', cleanupError.message);
-      }
+    // If passphrase is provided, decrypt the private key
+    if (passphrase) {
+      console.log('Decrypting private key with passphrase...');
+      privateKey = await openpgp.decryptKey({
+        privateKey: privateKey,
+        passphrase: passphrase
+      });
     }
+
+    // Read the encrypted message
+    const message = await openpgp.readMessage({ binaryMessage: encryptedData });
+
+    // Decrypt the message
+    const { data: decryptedData } = await openpgp.decrypt({
+      message,
+      decryptionKeys: privateKey
+    });
+
+    console.log('PGP decryption completed successfully');
+    return decryptedData;
   } catch (error) {
-    console.error('Error during GPG decryption:', error);
+    console.error('Error during PGP decryption:', error);
     throw new Error(`Failed to decrypt file: ${error.message}`);
   }
 }
@@ -184,11 +161,17 @@ exports.handler = async (event, context) => {
   console.log('Event:', JSON.stringify(event, null, 2));
 
   try {
-    // Configuration
-    const bucketName = 'sftp-file-sync-vivien';
-    const prefix = 'sync-files/';
-    const secretName = 'pgp-key';
-    const passphrase = process.env.PGP_PASSPHRASE || 'default-passphrase';
+    // Configuration from environment variables
+    const bucketName = process.env.S3_BUCKET_NAME || 'sftp-file-sync-vivien';
+    const prefix = process.env.S3_PREFIX || 'sync-files/';
+    const secretName = process.env.SECRET_NAME || 'pgp-key';
+    const passphrase = process.env.PGP_PASSPHRASE;
+
+    console.log(`Configuration:
+        - S3 Bucket: ${bucketName}
+        - S3 Prefix: ${prefix}
+        - Secret Name: ${secretName}
+        - Passphrase: ${passphrase ? '[SET]' : '[NOT SET]'}`);
 
     // Get PGP private key from Secrets Manager
     const privateKey = await getPGPPrivateKey(secretName);
