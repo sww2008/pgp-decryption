@@ -8,7 +8,7 @@
   },
   "dependencies": {
     "aws-sdk": "^2.1490.0",
-    "openpgp": "^5.10.1"
+    "gpg": "^0.1.0"
   },
   "engines": {
     "node": ">=22.0.0"

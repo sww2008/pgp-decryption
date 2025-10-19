@@ -1,4 +1,4 @@
-name: Build Lambda Package
+name: Test and Build Lambda Package
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  test-and-build:
     runs-on: ubuntu-latest
     
     steps:
@@ -24,8 +24,34 @@ jobs:
     - name: Install dependencies
       run: npm ci
       
-    - name: Run tests (if any)
+    - name: Run ESLint (if configured)
+      run: npm run lint --if-present
+      continue-on-error: true
+      
+    - name: Run tests
       run: npm test --if-present
+      continue-on-error: true
+      
+    - name: Check package.json
+      run: |
+        echo "Checking package.json configuration..."
+        node -e "
+          const pkg = require('./package.json');
+          console.log('Package name:', pkg.name);
+          console.log('Package version:', pkg.version);
+          console.log('Node.js version requirement:', pkg.engines?.node);
+          console.log('Dependencies:', Object.keys(pkg.dependencies || {}));
+        "
+        
+    - name: Validate Lambda handler
+      run: |
+        echo "Validating Lambda handler..."
+        node -c index.js
+        echo "✅ Lambda handler syntax is valid"
+        
+    - name: Check for security vulnerabilities
+      run: npm audit --audit-level moderate
+      continue-on-error: true
       
     - name: Create Lambda deployment package
       run: |

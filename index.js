@@ -1,5 +1,12 @@
 const AWS = require('aws-sdk');
-const openpgp = require('openpgp');
+const gpg = require('gpg');
+const { exec } = require('child_process');
+const { promisify } = require('util');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+
+const execAsync = promisify(exec);
 
 // Initialize AWS services
 const secretsManager = new AWS.SecretsManager({ region: process.env.AWS_REGION || 'us-east-1' });
@@ -11,25 +18,25 @@ const s3 = new AWS.S3({ region: process.env.AWS_REGION || 'us-east-1' });
  * @returns {Promise<string>} - The PGP private key
  */
 async function getPGPPrivateKey(secretName = 'pgp-key') {
-    try {
-        console.log(`Retrieving PGP private key from secret: ${secretName}`);
-        
-        const params = {
-            SecretId: secretName
-        };
-        
-        const result = await secretsManager.getSecretValue(params).promise();
-        
-        if (result.SecretString) {
-            console.log('Successfully retrieved PGP private key from Secrets Manager');
-            return result.SecretString;
-        } else {
-            throw new Error('Secret value is not a string');
-        }
-    } catch (error) {
-        console.error('Error retrieving PGP private key:', error);
-        throw new Error(`Failed to retrieve PGP private key: ${error.message}`);
+  try {
+    console.log(`Retrieving PGP private key from secret: ${secretName}`);
+
+    const params = {
+      SecretId: secretName
+    };
+
+    const result = await secretsManager.getSecretValue(params).promise();
+
+    if (result.SecretString) {
+      console.log('Successfully retrieved PGP private key from Secrets Manager');
+      return result.SecretString;
+    } else {
+      throw new Error('Secret value is not a string');
     }
+  } catch (error) {
+    console.error('Error retrieving PGP private key:', error);
+    throw new Error(`Failed to retrieve PGP private key: ${error.message}`);
+  }
 }
 
 /**
@@ -39,22 +46,22 @@ async function getPGPPrivateKey(secretName = 'pgp-key') {
  * @returns {Promise<Array>} - Array of file objects
  */
 async function listEncryptedFiles(bucketName, prefix) {
-    try {
-        console.log(`Listing files from s3://${bucketName}/${prefix}`);
-        
-        const params = {
-            Bucket: bucketName,
-            Prefix: prefix
-        };
-        
-        const result = await s3.listObjectsV2(params).promise();
-        
-        console.log(`Found ${result.Contents.length} files`);
-        return result.Contents || [];
-    } catch (error) {
-        console.error('Error listing files from S3:', error);
-        throw new Error(`Failed to list files from S3: ${error.message}`);
-    }
+  try {
+    console.log(`Listing files from s3://${bucketName}/${prefix}`);
+
+    const params = {
+      Bucket: bucketName,
+      Prefix: prefix
+    };
+
+    const result = await s3.listObjectsV2(params).promise();
+
+    console.log(`Found ${result.Contents.length} files`);
+    return result.Contents || [];
+  } catch (error) {
+    console.error('Error listing files from S3:', error);
+    throw new Error(`Failed to list files from S3: ${error.message}`);
+  }
 }
 
 /**
@@ -64,20 +71,20 @@ async function listEncryptedFiles(bucketName, prefix) {
  * @returns {Promise<Buffer>} - File content as Buffer
  */
 async function downloadFileFromS3(bucketName, key) {
-    try {
-        console.log(`Downloading file: s3://${bucketName}/${key}`);
-        
-        const params = {
-            Bucket: bucketName,
-            Key: key
-        };
-        
-        const result = await s3.getObject(params).promise();
-        return result.Body;
-    } catch (error) {
-        console.error(`Error downloading file ${key}:`, error);
-        throw new Error(`Failed to download file ${key}: ${error.message}`);
-    }
+  try {
+    console.log(`Downloading file: s3://${bucketName}/${key}`);
+
+    const params = {
+      Bucket: bucketName,
+      Key: key
+    };
+
+    const result = await s3.getObject(params).promise();
+    return result.Body;
+  } catch (error) {
+    console.error(`Error downloading file ${key}:`, error);
+    throw new Error(`Failed to download file ${key}: ${error.message}`);
+  }
 }
 
 /**
@@ -88,56 +95,82 @@ async function downloadFileFromS3(bucketName, key) {
  * @returns {Promise<Object>} - S3 upload result
  */
 async function uploadDecryptedFile(bucketName, key, decryptedContent) {
-    try {
-        // Create decrypted file path by removing .gpg extension if present
-        const decryptedKey = key.endsWith('.gpg') ? key.slice(0, -4) : `${key}.decrypted`;
-        
-        console.log(`Uploading decrypted file: s3://${bucketName}/${decryptedKey}`);
-        
-        const params = {
-            Bucket: bucketName,
-            Key: decryptedKey,
-            Body: decryptedContent,
-            ContentType: 'application/octet-stream'
-        };
-        
-        const result = await s3.upload(params).promise();
-        console.log(`Successfully uploaded decrypted file: ${result.Location}`);
-        return result;
-    } catch (error) {
-        console.error(`Error uploading decrypted file:`, error);
-        throw new Error(`Failed to upload decrypted file: ${error.message}`);
-    }
+  try {
+    // Create decrypted file path by removing .gpg extension if present
+    const decryptedKey = key.endsWith('.gpg') ? key.slice(0, -4) : `${key}.decrypted`;
+
+    console.log(`Uploading decrypted file: s3://${bucketName}/${decryptedKey}`);
+
+    const params = {
+      Bucket: bucketName,
+      Key: decryptedKey,
+      Body: decryptedContent,
+      ContentType: 'application/octet-stream'
+    };
+
+    const result = await s3.upload(params).promise();
+    console.log(`Successfully uploaded decrypted file: ${result.Location}`);
+    return result;
+  } catch (error) {
+    console.error(`Error uploading decrypted file:`, error);
+    throw new Error(`Failed to upload decrypted file: ${error.message}`);
+  }
 }
 
 /**
- * Decrypts a file using PGP private key
+ * Decrypts a file using GPG command line tool
  * @param {Buffer} encryptedData - Encrypted file data
  * @param {string} privateKeyArmored - PGP private key in armored format
+ * @param {string} passphrase - Passphrase for the private key
  * @returns {Promise<Buffer>} - Decrypted file content
  */
-async function decryptFile(encryptedData, privateKeyArmored) {
+async function decryptFile(encryptedData, privateKeyArmored, passphrase) {
+  try {
+    console.log('Starting GPG decryption process');
+
+    // Create temporary directory for GPG operations
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gpg-'));
+    const keyFile = path.join(tempDir, 'private-key.asc');
+    const encryptedFile = path.join(tempDir, 'encrypted.gpg');
+    const decryptedFile = path.join(tempDir, 'decrypted');
+
     try {
-        console.log('Starting PGP decryption process');
-        
-        // Read the private key
-        const privateKey = await openpgp.readPrivateKey({ armoredKey: privateKeyArmored });
-        
-        // Read the encrypted message
-        const message = await openpgp.readMessage({ binaryMessage: encryptedData });
-        
-        // Decrypt the message
-        const { data: decryptedData } = await openpgp.decrypt({
-            message,
-            decryptionKeys: privateKey
-        });
-        
-        console.log('PGP decryption completed successfully');
-        return decryptedData;
-    } catch (error) {
-        console.error('Error during PGP decryption:', error);
-        throw new Error(`Failed to decrypt file: ${error.message}`);
+      // Write private key to temporary file
+      fs.writeFileSync(keyFile, privateKeyArmored);
+
+      // Write encrypted data to temporary file
+      fs.writeFileSync(encryptedFile, encryptedData);
+
+      // Import the private key
+      console.log('Importing private key...');
+      await execAsync(`gpg --import --batch --yes "${keyFile}"`);
+
+      // Decrypt the file using GPG
+      console.log('Decrypting file...');
+      const decryptCommand = `gpg --decrypt --batch --yes --passphrase "${passphrase}" --output "${decryptedFile}" "${encryptedFile}"`;
+      await execAsync(decryptCommand);
+
+      // Read the decrypted content
+      const decryptedData = fs.readFileSync(decryptedFile);
+
+      console.log('GPG decryption completed successfully');
+      return decryptedData;
+
+    } finally {
+      // Clean up temporary files
+      try {
+        if (fs.existsSync(keyFile)) fs.unlinkSync(keyFile);
+        if (fs.existsSync(encryptedFile)) fs.unlinkSync(encryptedFile);
+        if (fs.existsSync(decryptedFile)) fs.unlinkSync(decryptedFile);
+        fs.rmdirSync(tempDir);
+      } catch (cleanupError) {
+        console.warn('Warning: Failed to clean up temporary files:', cleanupError.message);
+      }
     }
+  } catch (error) {
+    console.error('Error during GPG decryption:', error);
+    throw new Error(`Failed to decrypt file: ${error.message}`);
+  }
 }
 
 /**
@@ -147,95 +180,96 @@ async function decryptFile(encryptedData, privateKeyArmored) {
  * @returns {Promise<Object>} - Lambda response
  */
 exports.handler = async (event, context) => {
-    console.log('Lambda function started');
-    console.log('Event:', JSON.stringify(event, null, 2));
-    
-    try {
-        // Configuration
-        const bucketName = 'sftp-file-sync-vivien';
-        const prefix = 'sync-files/';
-        const secretName = 'pgp-key';
-        
-        // Get PGP private key from Secrets Manager
-        const privateKey = await getPGPPrivateKey(secretName);
-        
-        // List all files in the S3 bucket/prefix
-        const files = await listEncryptedFiles(bucketName, prefix);
-        
-        if (files.length === 0) {
-            console.log('No files found to decrypt');
-            return {
-                statusCode: 200,
-                body: JSON.stringify({
-                    message: 'No files found to decrypt',
-                    decryptedFiles: []
-                })
-            };
-        }
-        
-        const results = [];
-        
-        // Process each file
-        for (const file of files) {
-            try {
-                console.log(`Processing file: ${file.Key}`);
-                
-                // Skip if file is a directory
-                if (file.Key.endsWith('/')) {
-                    console.log(`Skipping directory: ${file.Key}`);
-                    continue;
-                }
-                
-                // Download encrypted file
-                const encryptedData = await downloadFileFromS3(bucketName, file.Key);
-                
-                // Decrypt the file
-                const decryptedData = await decryptFile(encryptedData, privateKey);
-                
-                // Upload decrypted file
-                const uploadResult = await uploadDecryptedFile(bucketName, file.Key, decryptedData);
-                
-                results.push({
-                    originalFile: file.Key,
-                    decryptedFile: uploadResult.Key,
-                    size: file.Size,
-                    lastModified: file.LastModified
-                });
-                
-                console.log(`Successfully processed file: ${file.Key}`);
-                
-            } catch (fileError) {
-                console.error(`Error processing file ${file.Key}:`, fileError);
-                results.push({
-                    originalFile: file.Key,
-                    error: fileError.message,
-                    status: 'failed'
-                });
-            }
-        }
-        
-        const successCount = results.filter(r => !r.error).length;
-        const failureCount = results.filter(r => r.error).length;
-        
-        console.log(`Processing completed. Success: ${successCount}, Failures: ${failureCount}`);
-        
-        return {
-            statusCode: 200,
-            body: JSON.stringify({
-                message: `Processed ${files.length} files. Success: ${successCount}, Failures: ${failureCount}`,
-                results: results
-            })
-        };
-        
-    } catch (error) {
-        console.error('Lambda function error:', error);
-        
-        return {
-            statusCode: 500,
-            body: JSON.stringify({
-                error: 'Internal server error',
-                message: error.message
-            })
-        };
+  console.log('Lambda function started');
+  console.log('Event:', JSON.stringify(event, null, 2));
+
+  try {
+    // Configuration
+    const bucketName = 'sftp-file-sync-vivien';
+    const prefix = 'sync-files/';
+    const secretName = 'pgp-key';
+    const passphrase = process.env.PGP_PASSPHRASE || 'default-passphrase';
+
+    // Get PGP private key from Secrets Manager
+    const privateKey = await getPGPPrivateKey(secretName);
+
+    // List all files in the S3 bucket/prefix
+    const files = await listEncryptedFiles(bucketName, prefix);
+
+    if (files.length === 0) {
+      console.log('No files found to decrypt');
+      return {
+        statusCode: 200,
+        body: JSON.stringify({
+          message: 'No files found to decrypt',
+          decryptedFiles: []
+        })
+      };
     }
+
+    const results = [];
+
+    // Process each file
+    for (const file of files) {
+      try {
+        console.log(`Processing file: ${file.Key}`);
+
+        // Skip if file is a directory
+        if (file.Key.endsWith('/')) {
+          console.log(`Skipping directory: ${file.Key}`);
+          continue;
+        }
+
+        // Download encrypted file
+        const encryptedData = await downloadFileFromS3(bucketName, file.Key);
+
+        // Decrypt the file
+        const decryptedData = await decryptFile(encryptedData, privateKey, passphrase);
+
+        // Upload decrypted file
+        const uploadResult = await uploadDecryptedFile(bucketName, file.Key, decryptedData);
+
+        results.push({
+          originalFile: file.Key,
+          decryptedFile: uploadResult.Key,
+          size: file.Size,
+          lastModified: file.LastModified
+        });
+
+        console.log(`Successfully processed file: ${file.Key}`);
+
+      } catch (fileError) {
+        console.error(`Error processing file ${file.Key}:`, fileError);
+        results.push({
+          originalFile: file.Key,
+          error: fileError.message,
+          status: 'failed'
+        });
+      }
+    }
+
+    const successCount = results.filter(r => !r.error).length;
+    const failureCount = results.filter(r => r.error).length;
+
+    console.log(`Processing completed. Success: ${successCount}, Failures: ${failureCount}`);
+
+    return {
+      statusCode: 200,
+      body: JSON.stringify({
+        message: `Processed ${files.length} files. Success: ${successCount}, Failures: ${failureCount}`,
+        results: results
+      })
+    };
+
+  } catch (error) {
+    console.error('Lambda function error:', error);
+
+    return {
+      statusCode: 500,
+      body: JSON.stringify({
+        error: 'Internal server error',
+        message: error.message
+      })
+    };
+  }
 };
