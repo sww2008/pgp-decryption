@@ -19,10 +19,9 @@ jobs:
       uses: actions/setup-node@v4
       with:
         node-version: '22.x'
-        cache: 'npm'
         
     - name: Install dependencies
-      run: npm ci
+      run: npm install
       
     - name: Run ESLint (if configured)
       run: npm run lint --if-present
@@ -65,7 +64,7 @@ jobs:
         
         # Install production dependencies only
         cd lambda-package
-        npm ci --only=production
+        npm install --only=production
         
         # Remove development dependencies and unnecessary files
         rm -rf node_modules/.cache
