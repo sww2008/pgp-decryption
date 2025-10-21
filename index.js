@@ -8,11 +8,13 @@ const s3 = new AWS.S3({ region: process.env.AWS_REGION || 'ap-southeast-2' });
 /**
  * Retrieves PGP private key and passphrase from AWS Secrets Manager
  * @param {string} secretName - Name of the secret containing the PGP key and passphrase
+ * @param {string} keyName - Name of the key field in the secret (defaults to 'pgp-key')
  * @returns {Promise<Object>} - Object containing privateKey and passphrase
  */
-async function getPGPPrivateKey(secretName = 'pgp-key') {
+async function getPGPPrivateKey(secretName, keyName = 'pgp-key') {
   try {
     console.log(`Retrieving PGP private key and passphrase from secret: ${secretName}`);
+    console.log(`Using key name: ${keyName}`);
 
     const params = {
       SecretId: secretName
@@ -26,12 +28,12 @@ async function getPGPPrivateKey(secretName = 'pgp-key') {
       // Parse the secret string to extract private key and passphrase
       const secretData = JSON.parse(result.SecretString);
 
-      if (!secretData['pgp-key']) {
-        throw new Error('Secret does not contain pgp-key field');
+      if (!secretData[keyName]) {
+        throw new Error(`Secret does not contain ${keyName} field`);
       }
 
       return {
-        privateKey: secretData['pgp-key'],
+        privateKey: secretData[keyName],
         passphrase: secretData.passphrase || null
       };
     } else {
@@ -96,12 +98,15 @@ async function downloadFileFromS3(bucketName, key) {
  * @param {string} bucketName - S3 bucket name
  * @param {string} key - S3 object key (original encrypted file path)
  * @param {Buffer} decryptedContent - Decrypted file content
+ * @param {string} encryptedPrefix - Prefix where decrypted files should be saved
  * @returns {Promise<Object>} - S3 upload result
  */
-async function uploadDecryptedFile(bucketName, key, decryptedContent) {
+async function uploadDecryptedFile(bucketName, key, decryptedContent, encryptedPrefix) {
   try {
-    // Create decrypted file path by removing .gpg extension if present
-    const decryptedKey = key.endsWith('.gpg') ? key.slice(0, -4) : `${key}.decrypted`;
+    // Create decrypted file path by removing .gpg extension if present and placing in encrypted prefix
+    const fileName = key.split('/').pop(); // Get just the filename
+    const decryptedFileName = fileName.endsWith('.gpg') ? fileName.slice(0, -4) : `${fileName}.decrypted`;
+    const decryptedKey = `${decryptedPrefix}${decryptedFileName}`;
 
     console.log(`Uploading decrypted file: s3://${bucketName}/${decryptedKey}`);
 
@@ -173,21 +178,46 @@ exports.handler = async (event, context) => {
 
   try {
     // Configuration from environment variables
-    const bucketName = process.env.S3_BUCKET_NAME || 'sftp-file-sync-vivien';
-    const prefix = process.env.S3_PREFIX || 'sync-files/';
-    const secretName = process.env.SECRET_NAME || 'pgp-key';
+    const bucketName = process.env.bucketName || process.env.S3_BUCKET_NAME || 'sftp-file-sync-vivien';
+    const prefix = process.env.S3_PREFIX;
+    const secretName = process.env.secretName || process.env.SECRET_NAME;
+    const awsRegion = process.env.AWS_REGION || 'ap-southeast-2';
+    const privateKey = process.env.privateKey;
+    const passphrase = process.env.passphrase;
+    const keyName = process.env.keyName;
+    const encryptedPrefix = process.env.encryptedPrefix || 'encrypt_files/';
+    const decryptedPrefix = process.env.decryptedPrefix || 'decrypt_files/';
 
     console.log(`Configuration:
         - S3 Bucket: ${bucketName}
         - S3 Prefix: ${prefix}
-        - Secret Name: ${secretName}`);
+        - Secret Name: ${secretName}
+        - AWS Region: ${awsRegion}
+        - Private Key: ${privateKey ? '[PROVIDED]' : '[FROM SECRET]'}
+        - Passphrase: ${passphrase ? '[PROVIDED]' : '[FROM SECRET]'}
+        - Key Name: ${keyName || '[NOT SET]'}
+        - Encrypted Prefix: ${encryptedPrefix}
+        - Decrypted Prefix: ${decryptedPrefix}`);
 
-    // Get PGP private key and passphrase from Secrets Manager
-    const { privateKey, passphrase } = await getPGPPrivateKey(secretName);
+    // Get PGP private key and passphrase from environment variables or Secrets Manager
+    let pgpPrivateKey, pgpPassphrase;
+    
+    if (privateKey) {
+      // Use private key from environment variable
+      pgpPrivateKey = privateKey;
+      pgpPassphrase = passphrase;
+      console.log('Using private key and passphrase from environment variables');
+    } else {
+      // Fall back to Secrets Manager
+      const secretData = await getPGPPrivateKey(secretName, keyName);
+      pgpPrivateKey = secretData.privateKey;
+      pgpPassphrase = secretData.passphrase;
+      console.log('Retrieved private key and passphrase from Secrets Manager');
+    }
 
-    console.log(`Retrieved from secret:
-        - Private Key: ${privateKey ? '[LOADED]' : '[NOT FOUND]'}
-        - Passphrase: ${passphrase ? '[SET]' : '[NOT SET]'}`);
+    console.log(`PGP Configuration:
+        - Private Key: ${pgpPrivateKey ? '[LOADED]' : '[NOT FOUND]'}
+        - Passphrase: ${pgpPassphrase ? '[SET]' : '[NOT SET]'}`);
 
     // List all files in the S3 bucket/prefix
     const files = await listEncryptedFiles(bucketName, prefix);
@@ -220,10 +250,10 @@ exports.handler = async (event, context) => {
         const encryptedData = await downloadFileFromS3(bucketName, file.Key);
 
         // Decrypt the file
-        const decryptedData = await decryptFile(encryptedData, privateKey, passphrase);
+        const decryptedData = await decryptFile(encryptedData, pgpPrivateKey, pgpPassphrase);
 
         // Upload decrypted file
-        const uploadResult = await uploadDecryptedFile(bucketName, file.Key, decryptedData);
+        const uploadResult = await uploadDecryptedFile(bucketName, file.Key, decryptedData, decryptedPrefix);
 
         results.push({
           originalFile: file.Key,
