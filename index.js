@@ -9,12 +9,14 @@ const s3 = new AWS.S3({ region: process.env.AWS_REGION || 'ap-southeast-2' });
  * Retrieves PGP private key and passphrase from AWS Secrets Manager
  * @param {string} secretName - Name of the secret containing the PGP key and passphrase
  * @param {string} keyName - Name of the key field in the secret (defaults to 'pgp-key')
+ * @param {string} passphraseName - Name of the passphrase field in the secret (defaults to 'passphrase')
  * @returns {Promise<Object>} - Object containing privateKey and passphrase
  */
-async function getPGPPrivateKey(secretName, keyName = 'pgp-key') {
+async function getPGPPrivateKey(secretName, keyName, passphraseName = 'passphrase') {
   try {
     console.log(`Retrieving PGP private key and passphrase from secret: ${secretName}`);
     console.log(`Using key name: ${keyName}`);
+    console.log(`Using passphrase name: ${passphraseName}`);
 
     const params = {
       SecretId: secretName
@@ -32,9 +34,16 @@ async function getPGPPrivateKey(secretName, keyName = 'pgp-key') {
         throw new Error(`Secret does not contain ${keyName} field`);
       }
 
+      const privateKey = secretData[keyName];
+      const passphrase = secretData[passphraseName] || null;
+      
+      console.log(`Retrieved private key length: ${privateKey ? privateKey.length : 'undefined'}`);
+      console.log(`Retrieved passphrase length: ${passphrase ? passphrase.length : 'undefined'}`);
+      console.log(`Private key starts with: ${privateKey ? privateKey.substring(0, 50) + '...' : 'undefined'}`);
+
       return {
-        privateKey: secretData[keyName],
-        passphrase: secretData.passphrase || null
+        privateKey: privateKey,
+        passphrase: passphrase
       };
     } else {
       throw new Error('Secret value is not a string');
@@ -178,13 +187,12 @@ exports.handler = async (event, context) => {
 
   try {
     // Configuration from environment variables
-    const bucketName = process.env.bucketName || process.env.S3_BUCKET_NAME || 'sftp-file-sync-vivien';
+    const bucketName = process.env.bucketName || process.env.S3_BUCKET_NAME;
     const prefix = process.env.S3_PREFIX;
     const secretName = process.env.secretName || process.env.SECRET_NAME;
     const awsRegion = process.env.AWS_REGION || 'ap-southeast-2';
-    const privateKey = process.env.privateKey;
-    const passphrase = process.env.passphrase;
     const keyName = process.env.keyName;
+    const passphraseName = process.env.passphraseName;
     const encryptedPrefix = process.env.encryptedPrefix || 'encrypt_files/';
     const decryptedPrefix = process.env.decryptedPrefix || 'decrypt_files/';
 
@@ -193,34 +201,23 @@ exports.handler = async (event, context) => {
         - S3 Prefix: ${prefix}
         - Secret Name: ${secretName}
         - AWS Region: ${awsRegion}
-        - Private Key: ${privateKey ? '[PROVIDED]' : '[FROM SECRET]'}
-        - Passphrase: ${passphrase ? '[PROVIDED]' : '[FROM SECRET]'}
         - Key Name: ${keyName || '[NOT SET]'}
+        - Passphrase Name: ${passphraseName || '[NOT SET]'}
         - Encrypted Prefix: ${encryptedPrefix}
         - Decrypted Prefix: ${decryptedPrefix}`);
 
-    // Get PGP private key and passphrase from environment variables or Secrets Manager
-    let pgpPrivateKey, pgpPassphrase;
-    
-    if (privateKey) {
-      // Use private key from environment variable
-      pgpPrivateKey = privateKey;
-      pgpPassphrase = passphrase;
-      console.log('Using private key and passphrase from environment variables');
-    } else {
-      // Fall back to Secrets Manager
-      const secretData = await getPGPPrivateKey(secretName, keyName);
-      pgpPrivateKey = secretData.privateKey;
-      pgpPassphrase = secretData.passphrase;
-      console.log('Retrieved private key and passphrase from Secrets Manager');
-    }
+    // Get PGP private key and passphrase from AWS Secrets Manager
+    const secretData = await getPGPPrivateKey(secretName, keyName, passphraseName);
+    const pgpPrivateKey = secretData.privateKey;
+    const pgpPassphrase = secretData.passphrase;
+    console.log('Retrieved private key and passphrase from AWS Secrets Manager');
 
     console.log(`PGP Configuration:
         - Private Key: ${pgpPrivateKey ? '[LOADED]' : '[NOT FOUND]'}
         - Passphrase: ${pgpPassphrase ? '[SET]' : '[NOT SET]'}`);
 
     // List all files in the S3 bucket/prefix
-    const files = await listEncryptedFiles(bucketName, prefix);
+    const files = await listEncryptedFiles(bucketName, encryptedPrefix);
 
     if (files.length === 0) {
       console.log('No files found to decrypt');
